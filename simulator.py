@@ -31,6 +31,8 @@ import gc
 #import pstats
 #import h5py
 
+# Default output directory — overridden by __main__ via `global dataSaveDir`
+dataSaveDir = "data/testTime"
 
 
 class Parameters:
@@ -66,6 +68,9 @@ class Parameters:
 		self.pollutionRouting = False
 		self.ring = True
 
+		self.useRealCity = True
+		self.realCityFile = "graph_grid.json"
+
 		self.numberChargersPerBlock=1
 
 		self.densityCars=0.1
@@ -79,7 +84,7 @@ class Parameters:
 
 		# A* optimization
 		self.opmitimizeCSSearch=3 # bigger is more slow
-		self.aStarDeep=100 # Number of positions to search in the aStar algorithm
+		self.aStarDeep=50 # Number of positions to search in the aStar algorithm
 		self.aStarRemainderWeight=2 #* weight of lineal distance to target to time
 
 		# A* optimization Time
@@ -106,6 +111,7 @@ class Parameters:
 		self.statsFileName="paper2/stats_" 
 		self.metastatsFileName="paper2/metastats/"
 		self.dataSave="simulationData32Last"
+		self.fileName=""
 
 
 	def clone(self):
@@ -364,7 +370,8 @@ class ChargingStation:
 		It is used to calculate the distance to the CSs near on the bifurcation cells. 
 		'''
 		cell=self.cell
-		visited = []
+		visited = set()
+		visited.add(cell)
 		distance = 0
 		current_level = [cell]
 
@@ -372,8 +379,6 @@ class ChargingStation:
 			next_level = []
 
 			for current_cell in current_level:
-				visited.append(current_cell)
-
 				allowInsert=False
 				if len(current_cell.destination) > 1:
 					# sort h2cs
@@ -394,6 +399,7 @@ class ChargingStation:
 					# Add the origins to the list of the next level
 					for origin in current_cell.origin:
 						if origin not in visited:
+							visited.add(origin)
 							next_level.append(origin)
 
 			# Increase the distance and move to the next level
@@ -801,7 +807,14 @@ class City:
 		self.p=p
 		self.indiv = indiv
 		self.block=Block(p,allocate_CS = indiv == None)
-		self.grid=Grid(p,p.verticalBlocks*self.block.height,p.horizontalBlocks*self.block.width) #Hacked: añadido "p,"
+		if getattr(p, "useRealCity", False):
+			with open(p.realCityFile, "r") as f:
+				self.realCityData = json.load(f)
+			rows = self.realCityData["grid_info"]["rows"]
+			cols = self.realCityData["grid_info"]["cols"]
+			self.grid=Grid(p,rows,cols)
+		else:
+			self.grid=Grid(p,p.verticalBlocks*self.block.height,p.horizontalBlocks*self.block.width) #Hacked: añadido "p,"
 
 		self.t=0
 
@@ -860,7 +873,7 @@ class City:
 		notSaveGif=True
 		if notSaveGif:
 			initial_time = time.time()
-			savedTimes=10
+			savedTimes=times
 			next(self.city_generator)#GENERARLO MUCHAS VECES
 			# print("\t\tNum cars: ", len(self.cars))
 			if returnFits or contaminationExp:
@@ -940,6 +953,8 @@ class City:
 				#Arand=np.random.rand(width,height)
 				Arand=np.zeros((width,height))#np.ones((width,height))
 			for i in range(times+1):
+				if times > 0 and i % max(1, times // 2000) == 0:
+					print(f"Progreso de simulación: {int(i / times * 100)}% completado ({i}/{times})", flush=True)
 				try:
 					#print(i)
 					n = i-times//4
@@ -950,17 +965,17 @@ class City:
 					if i==0:
 						for k in range(width):
 							for j in range(height):
-								self.grid.grid[k,j].pollutionLevel = Arand[k,j]
+								self.grid.grid[j,k].pollutionLevel = Arand[k,j]
 					#for pollutant in P:
 					#	for evType in P[pollutant]:
 					#		Psum[:,:,i] += P[cartype][pollutant][:,:,i]
 					if names[-1]:
 						for k in range(width):
 							for j in range(height):
-								if self.grid.grid[k,j].pollutionLevel <= Arand[k,j]:
-									self.grid.grid[k,j].pollutionLevel = max(Arand[k,j], sum([P[f"{cartype}_CO2"][k+1,j+1] for cartype in CAR_PROPERTIES if cartype != CarType.EV])) #CAMBIAR A NEEDSCHARGING
+								if self.grid.grid[j,k].pollutionLevel <= Arand[k,j]:
+									self.grid.grid[j,k].pollutionLevel = max(Arand[k,j], sum([P[f"{cartype}_CO2"][k+1,j+1] for cartype in CAR_PROPERTIES if cartype != CarType.EV])) #CAMBIAR A NEEDSCHARGING
 								else:
-									self.grid.grid[k,j].pollutionLevel = 0.5*(sum([P[f"{cartype}_CO2"][k+1,j+1] for cartype in CAR_PROPERTIES if cartype != CarType.EV]) + self.grid.grid[k,j].pollutionLevel) #CAMBIAR A NEEDSCHARGING
+									self.grid.grid[j,k].pollutionLevel = 0.5*(sum([P[f"{cartype}_CO2"][k+1,j+1] for cartype in CAR_PROPERTIES if cartype != CarType.EV]) + self.grid.grid[j,k].pollutionLevel) #CAMBIAR A NEEDSCHARGING
 					if i>0:
 						next(self.city_generator)
 					if returnFits or contaminationExp:
@@ -1003,8 +1018,8 @@ class City:
 										averages[f"cars_{cartype}_accelerations"][a,b] += accel/(n+1)
 									else:
 										averages[f"cars_{cartype}_braking"][a,b] -= accel/(n+1)
-									cell_vel = self.grid.grid[a, b].velocity
-									mean_all_cars_vel.append(min(vel/cell_vel, 1.))
+									cell_vel = self.grid.grid[b, a].velocity
+									mean_all_cars_vel.append(min(vel/cell_vel if cell_vel > 0 else 0, 1.))
 								if self.cars[key].cell is not None:
 									for key in G:
 										if key.startswith(f"{cartype}_"):
@@ -1143,14 +1158,14 @@ class City:
 					if i==0:
 						for k in range(width):
 							for j in range(height):
-								self.grid.grid[k,j].pollutionLevel = 0
+								self.grid.grid[j,k].pollutionLevel = 0
 					#for pollutant in P:
 					#	for evType in P[pollutant]:
 					#		Psum[:,:,i] += P[cartype][pollutant][:,:,i]
 					if names[-1]:
 						for k in range(width):
 							for j in range(height):
-								self.grid.grid[k,j].pollutionLevel = 0.5*(sum([P[cartype]['CO2'][k+1,j+1,i] for cartype in CAR_PROPERTIES if cartype != CarType.EV]) + self.grid.grid[k,j].pollutionLevel)
+								self.grid.grid[j,k].pollutionLevel = 0.5*(sum([P[cartype]['CO2'][k+1,j+1,i] for cartype in CAR_PROPERTIES if cartype != CarType.EV]) + self.grid.grid[j,k].pollutionLevel)
 					if i>0:
 						next(self.city_generator)
 					for k in range(num_cs):
@@ -1685,58 +1700,80 @@ class City:
 		if self.p.viewDrawCity:
 			yieldCada=1
 		yieldI=0
-		for i in range(self.p.verticalBlocks):
-			for j in range(self.p.horizontalBlocks):
-				for _ in self.block.draw(self.grid,i*self.block.height+self.block.height//2,j*self.block.width+self.block.width//2):
-					if self.p.viewDrawCity:
-						if yieldCada<=yieldI:
-							yieldI=0
-							yield
-						yieldI+=1
-				self.block.semaphore(self.grid,i*self.block.height+self.block.height//2,j*self.block.width+self.block.width//2)
-		#aqui anillo
-		#'''
-		if self.p.ring:
-			#self.p.ring=False
-			xmax = self.p.horizontalBlocks * self.block.width-1
-			ymax = self.p.verticalBlocks * self.block.height-1
-			y=ymax
-			for x in range(xmax+2): # CHANGED +1 -> +2
-				if x==0:
-					for _ in self.block.draw2(self.grid, 0, y-1, x, y, 5, True):
-						pass
-				else:
-					for _ in self.block.draw2(self.grid, x-1, y, x, y, 5, True):
-						pass
-			#print('here4')
-			x=xmax
-			for y in reversed(range(ymax+2)): # CHANGED +1 -> +2
-				if y==ymax:
-					for _ in self.block.draw2(self.grid, x-1, ymax, x, y, 5, True):
-						pass
-				else:
-					for _ in self.block.draw2(self.grid, x, y+1, x, y, 5, True):
-						pass
-			#print('here4')
-			y=0
-			for x in reversed(range(xmax+2)):
-				if x==xmax:
-					for _ in self.block.draw2(self.grid, xmax, y+1, x, y, 5, True):
-						pass
-				else:
-					for _ in self.block.draw2(self.grid, x+1, y, x, y, 5, True):
-						pass
-			#print('here4')
-			x=0
-			for y in range(ymax+2):
-				if y==0:
-					for _ in self.block.draw2(self.grid, x+1, 0, x, y, 5, True):
-						pass
-				else:
-					for _ in self.block.draw2(self.grid, x, y-1, x, y, 5, True):
-						pass
-		self.p.ring=True
-		#'''
+
+		if getattr(self.p, "useRealCity", False):
+			cells_data = self.realCityData["cells"]
+			for c_data in cells_data:
+				r, c = c_data["row"], c_data["col"]
+				origin = self.grid.grid[r, c]
+				speed_kph = c_data.get("speed_kph", 30)
+				# Convert km/h to cells per timestep. 
+				# 1 timestep = 1.8s, 1 cell = 5m.
+				# cells_per_step = speed_kph / 3.6 * 1.8 / 5 = speed_kph / 10
+				speed = max(1, round(speed_kph / 10.0))
+				for nr, nc in c_data.get("neighbors", []):
+					target = self.grid.grid[nr, nc]
+					self.grid.link(origin, target, speed)
+			
+			if self.indiv is None:
+				for _ in range(self.p.numberStations):
+					street_cell = self.grid.randomStreet()
+					if street_cell:
+						cs = ChargingStation(self.p, self.grid, street_cell)
+						self.grid.cs.append(cs)
+		else:
+			for i in range(self.p.verticalBlocks):
+				for j in range(self.p.horizontalBlocks):
+					for _ in self.block.draw(self.grid,i*self.block.height+self.block.height//2,j*self.block.width+self.block.width//2):
+						if self.p.viewDrawCity:
+							if yieldCada<=yieldI:
+								yieldI=0
+								yield
+							yieldI+=1
+					self.block.semaphore(self.grid,i*self.block.height+self.block.height//2,j*self.block.width+self.block.width//2)
+			#aqui anillo
+			#'''
+			if self.p.ring:
+				#self.p.ring=False
+				xmax = self.p.horizontalBlocks * self.block.width-1
+				ymax = self.p.verticalBlocks * self.block.height-1
+				y=ymax
+				for x in range(xmax+2): # CHANGED +1 -> +2
+					if x==0:
+						for _ in self.block.draw2(self.grid, 0, y-1, x, y, 5, True):
+							pass
+					else:
+						for _ in self.block.draw2(self.grid, x-1, y, x, y, 5, True):
+							pass
+				#print('here4')
+				x=xmax
+				for y in reversed(range(ymax+2)): # CHANGED +1 -> +2
+					if y==ymax:
+						for _ in self.block.draw2(self.grid, x-1, ymax, x, y, 5, True):
+							pass
+					else:
+						for _ in self.block.draw2(self.grid, x, y+1, x, y, 5, True):
+							pass
+				#print('here4')
+				y=0
+				for x in reversed(range(xmax+2)):
+					if x==xmax:
+						for _ in self.block.draw2(self.grid, xmax, y+1, x, y, 5, True):
+							pass
+					else:
+						for _ in self.block.draw2(self.grid, x+1, y, x, y, 5, True):
+							pass
+				#print('here4')
+				x=0
+				for y in range(ymax+2):
+					if y==0:
+						for _ in self.block.draw2(self.grid, x+1, 0, x, y, 5, True):
+							pass
+					else:
+						for _ in self.block.draw2(self.grid, x, y-1, x, y, 5, True):
+							pass
+			self.p.ring=True
+			#'''
 		# Parameters that depend on the number of streets is calculated here
 		p=self.p
 		if hasattr(self.p, 'listgenerator'):
@@ -1848,8 +1885,7 @@ class City:
 			else:
 				p2.type=CarType.ICEV
 			'''
-
-			self.cars.append(Car(p2,id,self.grid,self.grid.randomStreet(),self.grid.randomStreet(),self.t))
+			self.cars.append(Car(p2,id,self.grid,self.grid.randomStreet(require_h2cs=True),self.grid.randomStreet(require_h2cs=True),self.t))
 			if self.p.viewDrawCity:
 				if yieldCada<=yieldI:
 					yieldI=0
@@ -1943,13 +1979,15 @@ class Grid:
 			dy = self.heigh - dy
 		return dx + dy
 	
-	def randomStreet(self):
+	def randomStreet(self, require_h2cs=False):
 		# If the random is fixed and introduced on cars we can reproduce the same simulation
 		while True:
 			x = random.randint(0,self.width-1)
 			y = random.randint(0,self.heigh-1)
 			cell=self.grid[y][x]
 			if cell.state!=Cell.FREE and cell.car==None:
+				if require_h2cs and len(cell.h2cs) == 0:
+					continue
 				return cell
 	def link(self,origin,target,velocity):
 		if origin!=None:
@@ -2040,7 +2078,7 @@ class Car:
 		last=self.cell
 		for i in range(p.carSizeTarget):
 			while True:
-				cand=self.grid.randomStreet()
+				cand=self.grid.randomStreet(require_h2cs=True)
 				if cand!=last:
 					break
 			self.targets.append(cand)
@@ -2050,8 +2088,11 @@ class Car:
 	def inTarget(self,target):
 		return self.cell==target
 	
-	def localizeCS(self,cell,t,distance=0): 
+	def localizeCS(self,cell,t,distance=0,visited=None): 
 		# return distance, timeToAttend, cs
+		if visited is None: visited = set()
+		if cell in visited: return (distance, 0, None)
+		visited.add(cell)
 		if self.p.aStarRandomCS:
 			# select random CS
 			cs=random.choice(self.grid.cs) 
@@ -2064,7 +2105,7 @@ class Car:
 				return (distance,0,cell.cs)
 		if len(cell.h2cs)==0:
 			if len(cell.destination)==1:
-				return self.localizeCS(cell.destination[0],t,distance+1)
+				return self.localizeCS(cell.destination[0],t,distance+1,visited)
 			else:
 				print("Error: in data structure of CS")
 		tupla=None
@@ -2142,13 +2183,14 @@ class Car:
 			return 
 
 		if len(ire)==0:
-			print('dis=', dis)
-			p=self.p
-			file_name = f'P_delta_{0.1}_gamma_{0.01}_times_{2000}_seed_{p.seed}_buildings_{p.buildings}_distributionCS_{p.distributionCS}_densityCars_{p.densityCars}_densityEV_{p.densityEV}_densityDiesel_{p.densityDiesel}_windV_{p.windV}_pollutionRouting_{p.pollutionRouting}.npz'
-			print("\t\t-Error: in data structure of A*")
-			print(f"\t\t\t--{t}-",file_name)
-			print(f"\t\t\t--{t}-",cell.x, " - ", cell.y)
-			print(p.id)
+			# print('dis=', dis)
+			# p=self.p
+			# file_name = f'P_delta_{0.1}_gamma_{0.01}_times_{2000}_seed_{p.seed}_buildings_{p.buildings}_distributionCS_{p.distributionCS}_densityCars_{p.densityCars}_densityEV_{p.densityEV}_densityDiesel_{p.densityDiesel}_windV_{p.windV}_pollutionRouting_{p.pollutionRouting}.npz'
+			# print("\t\t-Error: in data structure of A*")
+			# print(f"\t\t\t--{t}-",file_name)
+			# print(f"\t\t\t--{t}-",cell.x, " - ", cell.y)
+			# print(p.id)
+			pass
 		dis2,_,_=self.localizeCS(self.target,t)
 		if self.moves<dis+dis2:
 			self.state=CarState.ToCharging
@@ -2173,10 +2215,12 @@ class Car:
 			else:
 				self.state=CarState.Destination
 				self.cell.t=t
+				self.priority = -abs(self.priority)
 				return 
 		if self.inTarget(self.target2):
 			# There is no error if pass over target2, because target2 is only set when there is need to recharge	
 			if self.enterOnCS():
+				self.priority = -abs(self.priority)
 				return
 		
 		cell=self.cell
@@ -2190,21 +2234,61 @@ class Car:
 			toCell=self.toCell.pop(0)
 		else:
 			calculateNext(cell)
-			toCell=self.toCell.pop(0)
+			if len(self.toCell) == 0:
+				if cell.destination:
+					toCell = random.choice(cell.destination)
+					new_dest = self.grid.randomStreet(require_h2cs=True)
+					if new_dest:
+						self.targets[self.goTargets] = new_dest
+						self.target = new_dest
+				else:
+					self.priority = -abs(self.priority)
+					return
+			else:
+				toCell=self.toCell.pop(0)
 
 		#if toCell.t==t or toCell.car!=None:
 		#	if self.p.yellowBox:
 		#		for s in cell.semaphore:
 		#			s.t=t
+		is_swapping = False
 		isStop=toCell.t==t or toCell.car!=None
-		if not isStop and (len(toCell.destination)>1 or len(toCell.origin)>1):
+
+		# --- HEAD-ON SWAP LOGIC ---
+		if isStop and getattr(self.p, "useRealCity", False) and toCell.car is not None:
+			other_car = toCell.car
+			other_wants_us = False
+			if len(other_car.toCell) > 0 and other_car.toCell[0] == cell:
+				other_wants_us = True
+			elif len(other_car.cell.destination) == 1 and other_car.cell.destination[0] == cell:
+				other_wants_us = True
+				
+			if other_wants_us:
+				isStop = False
+				is_swapping = True
+				self._swapped_with = other_car
+		# --------------------------
+
+		if not is_swapping and not isStop and (len(toCell.destination)>1 or len(toCell.origin)>1):
 			if 1==len(toCell.destination):
 				toCell2=toCell.destination[0]
 			elif 0<len(self.toCell):
 				toCell2=self.toCell[0]
 			else:
 				calculateNext(toCell)
-				toCell2=self.toCell[0]
+				if len(self.toCell) == 0:
+					if toCell.destination:
+						toCell2 = random.choice(toCell.destination)
+						self.toCell = [toCell2]
+						new_dest = self.grid.randomStreet(require_h2cs=True)
+						if new_dest:
+							self.targets[self.goTargets] = new_dest
+							self.target = new_dest
+					else:
+						self.priority = -abs(self.priority)
+						return
+				else:
+					toCell2=self.toCell[0]
 			isStop=toCell2.t==t or toCell2.car!=None
 
 			if isStop:
@@ -2215,6 +2299,29 @@ class Car:
 							isStop=False
 							self.toCell=[other]
 							break
+
+		# --- NEW DEADLOCK PREVENTION STRATEGY FOR REAL CITY ---
+		if isStop and getattr(self.p, "useRealCity", False) and (t - cell.t0 > self.p.timeStop):
+			# The car has been stuck in this cell for more than 'timeStop' ticks.
+			# Look for ANY available neighbor cell to escape the deadlock.
+			possible_escapes = [neighbor for neighbor in cell.destination if neighbor.car is None and neighbor.t != t]
+			
+			if possible_escapes:
+				escape = possible_escapes[0] # Take the first available escape route
+				
+				# Discard the blocked planned route
+				self.toCell = []
+				
+				# Assign a new random destination in the city
+				new_destination = self.grid.randomStreet(require_h2cs=True)
+				if new_destination:
+					self.targets[self.goTargets] = new_destination
+					self.target = new_destination
+				
+				# Force the car to move to the escape cell immediately and clear the Stop flag
+				toCell = escape
+				isStop = False
+		# ------------------------------------------------------
 
 		if isStop: 
 			for s in cell.semaphore:
@@ -2242,8 +2349,17 @@ class Car:
 		#	for s in toCell.semaphore:
 		#		s.t=t
 		self.cell = toCell
-		cell.car = None
 		toCell.car = self
+		if hasattr(self, '_swapped_with') and self._swapped_with is not None:
+			other_car = self._swapped_with
+			cell.car = other_car
+			other_car.cell = cell
+			if len(other_car.toCell) > 0 and other_car.toCell[0] == cell:
+				other_car.toCell.pop(0)
+			other_car.t0 = t
+			self._swapped_with = None
+		else:
+			cell.car = None
 		cell.t=t
 		toCell.t0=t
 		cell.occupation+=1/cell.velocity
@@ -2271,6 +2387,17 @@ class Car:
 		else:
 			if len(self.toCell)==0:
 				calculateNext(toCell)
+				if len(self.toCell)==0:
+					if toCell.destination:
+						toCell2 = random.choice(toCell.destination)
+						self.toCell = [toCell2]
+						new_dest = self.grid.randomStreet(require_h2cs=True)
+						if new_dest:
+							self.targets[self.goTargets] = new_dest
+							self.target = new_dest
+					else:
+						self.priority = -abs(self.priority)
+						return
 			toCell=self.toCell[0]
 	
 		if not self.cell in toCell.origin:
@@ -2626,8 +2753,10 @@ class Car:
 
 			#HACKED
 			if best==None:
-				file_name = os.path.join(dataSaveDir, f'P_delta_{0.1}_gamma_{0.01}_times_{2000}_seed_{p.seed}_buildings_{p.buildings}_distributionCS_{p.distributionCS}_densityCars_{p.densityCars}_densityEV_{p.densityEV}_densityDiesel_{p.densityDiesel}_windV_{p.windV}_pollutionRouting_{p.pollutionRouting}.npz')
-				print('Here is the error: ', file_name)
+				# Muted the print statement because disconnected subgraphs in real city OSM maps cause this to spam the console
+				# file_name = os.path.join(dataSaveDir, f'P_delta_{0.1}_gamma_{0.01}_times_{2000}_seed_{self.p.seed}_buildings_{self.p.buildings}_distributionCS_{self.p.distributionCS}_densityCars_{self.p.densityCars}_densityEV_{self.p.densityEV}_densityDiesel_{self.p.densityDiesel}_windV_{self.p.windV}_pollutionRouting_{self.p.pollutionRouting}.npz')
+				# print('Here is the error: ', file_name)
+				return float('inf'), []
 
 			if best.cell==target:
 				stopCriteria=True
@@ -3080,9 +3209,14 @@ def cartesianExperiment():
 
 def experiment(i, numSave=0,run_all=True,view=False,cache=False,indiv=None, cnnExpDataSave=None, returnFits = False,
 	 contaminationExp = False, numTimesteps = 2000, delta = 0.1, corner_factor = 1, gamma = 0.01, acc = None, dif_matrix = None, 
-	 wind = None, timeTest = None):
+	 wind = None, timeTest = None, override_distributionCS=None, override_windV=None):
 	t_start = time.time()
 	p=cartesianExperiment()[i]
+	
+	if override_distributionCS is not None:
+		p.distributionCS = override_distributionCS
+	if override_windV is not None:
+		p.windV = override_windV
 
 	for cartype in CAR_PROPERTIES:
 		CAR_PROPERTIES[cartype].number=0
@@ -3318,23 +3452,32 @@ class Genetic:
 			sidewalk = True
 			
 			if sidewalk:
-				acc[45:52,:]=1
-				acc[:,45:52]=1
-				acc[141:148,:]=1
-				acc[:,141:148]=1
-				acc[237:244,:]=1
-				acc[:,237:244]=1
+				if not getattr(p, "useRealCity", False):
+					acc[45:52,:]=1
+					acc[:,45:52]=1
+					acc[141:148,:]=1
+					acc[:,141:148]=1
+					acc[237:244,:]=1
+					acc[:,237:244]=1
 
-				l=list(range(0,10))+list(range(85,106))+list(range(181,202))+list(range(277,287))
-				for i in l:
-					for j in l:
-						acc[i+1,j+1]=1
+					l=list(range(0,10))+list(range(85,106))+list(range(181,202))+list(range(277,287))
+					for i in l:
+						for j in l:
+							acc[i+1,j+1]=1
 		
 
 			acc[0,:]=1
 			acc[-1,:]=1
 			acc[:,0]=1
 			acc[:,-1]=1
+
+			# Anillo de borde ancho para que la contaminación pueda salir de la ciudad (solo ciudad real)
+			if getattr(p, "useRealCity", False):
+				border_ring_width = 5
+				acc[1:border_ring_width+1, :] = 1
+				acc[-(border_ring_width+1):-1, :] = 1
+				acc[:, 1:border_ring_width+1] = 1
+				acc[:, -(border_ring_width+1):-1] = 1
 
 			#acc[:,:]=1
 
@@ -3645,8 +3788,50 @@ class Genetic:
 		plt.plot(range(self.num_generations+1),values)
 		plt.show()
 
+
+# ---------------------------------------------------------------------------
+# Wind experiments for real city
+# ---------------------------------------------------------------------------
+def run_worker(args):
+    windV, label, numExperiment, num_timesteps = args
+    print(f"\n{'='*60}")
+    print(f" Starting wind experiment: {label}  windV={windV}")
+    print(f"{'='*60}")
+    g = ContaminationExperiment(
+        numExperiment=numExperiment,
+        buildings=True,
+        distributionCS=1,
+        windV=windV,
+        num_timesteps=num_timesteps,
+    )
+    g.run()
+    return f" Experiment '{label}' finished."
+
+def realCityWindExperiments(numExperiment=0, num_timesteps=2000):
+    """
+    Runs 3 pollution experiments for the real city with different wind conditions
+    in parallel using multiprocessing:
+      1. No wind:                     windV=(0, 0)
+      2. Parallel to most streets:    windV=(WE=-0.3, WN=0.9)
+      3. Perpendicular to streets:    windV=(WE=0.9,  WN=0.3)
+
+    windV convention is (WE, WN), same as in cartesianExperiment.
+    """
+    wind_configs = [
+        ((0,   0  ), "no_wind"),
+        ((np.float32(-0.3), np.float32(0.9)), "parallel_streets"),
+        ((np.float32(0.9), np.float32(0.3)), "perpendicular_streets"),
+    ]
+    
+    tasks = [(windV, label, numExperiment, num_timesteps) for (windV, label) in wind_configs]
+    with multiprocessing.Pool() as pool:
+        results = pool.map(run_worker, tasks)
+    for res in results:
+        print(res)
+
+
 class ContaminationExperiment:
-	def __init__(self,numExperiment=43, buildings = True, distributionCS=0, windV=(0.1,0)) -> None:
+	def __init__(self,numExperiment=43, buildings = True, distributionCS=0, windV=(0.1,0), num_timesteps=2000) -> None:
 		#numExperiment=0
 		self.numExperiment = numExperiment
 		self.buildings = buildings
@@ -3655,7 +3840,7 @@ class ContaminationExperiment:
 		#self.population_size = multiprocessing.cpu_count()
 		#self.max_num_stations = 5
 		self.num_chargers = 72
-		self.num_timesteps = 2000
+		self.num_timesteps = num_timesteps
 		#numExperiment=0
 		p=cartesianExperiment()[numExperiment]
 		p.listgenerator=True
@@ -3744,23 +3929,32 @@ class ContaminationExperiment:
 			sidewalk = True
 			
 			if sidewalk:
-				acc[45:52,:]=1
-				acc[:,45:52]=1
-				acc[141:148,:]=1
-				acc[:,141:148]=1
-				acc[237:244,:]=1
-				acc[:,237:244]=1
+				if not getattr(p, "useRealCity", False):
+					acc[45:52,:]=1
+					acc[:,45:52]=1
+					acc[141:148,:]=1
+					acc[:,141:148]=1
+					acc[237:244,:]=1
+					acc[:,237:244]=1
 
-				l=list(range(0,10))+list(range(85,106))+list(range(181,202))+list(range(277,287))
-				for i in l:
-					for j in l:
-						acc[i+1,j+1]=1
+					l=list(range(0,10))+list(range(85,106))+list(range(181,202))+list(range(277,287))
+					for i in l:
+						for j in l:
+							acc[i+1,j+1]=1
 		
 
 			acc[0,:]=1
 			acc[-1,:]=1
 			acc[:,0]=1
 			acc[:,-1]=1
+
+			# Anillo de borde ancho para que la contaminación pueda salir de la ciudad (solo ciudad real)
+			if getattr(p, "useRealCity", False):
+				border_ring_width = 5
+				acc[1:border_ring_width+1, :] = 1
+				acc[-(border_ring_width+1):-1, :] = 1
+				acc[:, 1:border_ring_width+1] = 1
+				acc[:, -(border_ring_width+1):-1] = 1
 
 			#acc[:,:]=1
 
@@ -3812,16 +4006,16 @@ class ContaminationExperiment:
 		displ_SW = np.zeros_like(displ_N)
 		displ_SE = np.zeros_like(displ_N)
 		stays = np.ones_like(displ_N)
-		for p in range(1, n_rows+1):
-			for q in range(1, n_cols+1):
-					displ_N[p,q] = acc[p,q] * np.maximum(self.WN, 0) * (1 - np.maximum(acc[p + sign_WE, q - 1], acc[p + sign_WE, q]) * abs(self.WE)) * acc[p, q - 1]
-					displ_S[p,q] = acc[p,q] * np.maximum(-self.WN,0) * (1 - np.maximum(acc[p + sign_WE, q + 1], acc[p + sign_WE, q]) * abs(self.WE)) * acc[p, q + 1]
-					displ_E[p,q] = acc[p,q] * np.maximum(self.WE, 0) * (1 - np.maximum(acc[p + 1, q - sign_WN], acc[p, q - sign_WN]) * abs(self.WN)) * acc[p + 1, q]
-					displ_W[p,q] = acc[p,q] * np.maximum(-self.WE,0) * (1 - np.maximum(acc[p - 1, q - sign_WN], acc[p, q - sign_WN]) * abs(self.WN)) * acc[p - 1, q]
-					displ_NE[p,q] = acc[p,q] * np.maximum(self.WN, 0) * np.maximum(self.WE, 0) * acc[p + 1, q - 1]
-					displ_NW[p,q] = acc[p,q] * np.maximum(self.WN, 0) * np.maximum(-self.WE,0) * acc[p - 1, q - 1]
-					displ_SE[p,q] = acc[p,q] * np.maximum(-self.WN,0) * np.maximum(self.WE, 0) * acc[p + 1, q + 1]
-					displ_SW[p,q] = acc[p,q] * np.maximum(-self.WN,0) * np.maximum(-self.WE,0) * acc[p - 1, q + 1]
+		for _p in range(1, n_rows+1):
+			for _q in range(1, n_cols+1):
+					displ_N[_p,_q] = acc[_p,_q] * np.maximum(self.WN, 0) * (1 - np.maximum(acc[_p + sign_WE, _q - 1], acc[_p + sign_WE, _q]) * abs(self.WE)) * acc[_p, _q - 1]
+					displ_S[_p,_q] = acc[_p,_q] * np.maximum(-self.WN,0) * (1 - np.maximum(acc[_p + sign_WE, _q + 1], acc[_p + sign_WE, _q]) * abs(self.WE)) * acc[_p, _q + 1]
+					displ_E[_p,_q] = acc[_p,_q] * np.maximum(self.WE, 0) * (1 - np.maximum(acc[_p + 1, _q - sign_WN], acc[_p, _q - sign_WN]) * abs(self.WN)) * acc[_p + 1, _q]
+					displ_W[_p,_q] = acc[_p,_q] * np.maximum(-self.WE,0) * (1 - np.maximum(acc[_p - 1, _q - sign_WN], acc[_p, _q - sign_WN]) * abs(self.WN)) * acc[_p - 1, _q]
+					displ_NE[_p,_q] = acc[_p,_q] * np.maximum(self.WN, 0) * np.maximum(self.WE, 0) * acc[_p + 1, _q - 1]
+					displ_NW[_p,_q] = acc[_p,_q] * np.maximum(self.WN, 0) * np.maximum(-self.WE,0) * acc[_p - 1, _q - 1]
+					displ_SE[_p,_q] = acc[_p,_q] * np.maximum(-self.WN,0) * np.maximum(self.WE, 0) * acc[_p + 1, _q + 1]
+					displ_SW[_p,_q] = acc[_p,_q] * np.maximum(-self.WN,0) * np.maximum(-self.WE,0) * acc[_p - 1, _q + 1]
 		stays += -(displ_N + displ_S + displ_E + displ_W + displ_NE + displ_NW + displ_SE + displ_SW)
 		self.wind = (displ_N[1:-1, 2:], displ_S[1:-1, :-2], displ_E[:-2, 1:-1], displ_W[2:, 1:-1], displ_NE[:-2, 2:], displ_NW[2:, 2:], displ_SE[:-2, :-2], displ_SW[2:, :-2], stays[1:-1, 1:-1])
 
@@ -3842,15 +4036,18 @@ class ContaminationExperiment:
 						GChargingStation((21,243),self.num_chargers//36), GChargingStation((74,237),self.num_chargers//36), GChargingStation((117,243),self.num_chargers//36), GChargingStation((170,237),self.num_chargers//36), GChargingStation((213,243),self.num_chargers//36), GChargingStation((266,237),self.num_chargers//36)])
 		
 		self.individuals = [individual1,individual2,individual3]
-		self.individual = self.individuals[self.distributionCS]
+		if getattr(p, "useRealCity", False):
+			self.individual = None
+		else:
+			self.individual = self.individuals[self.distributionCS]
 
 	def run(self):
 		#[self.distributionCS]
 		# returnFits must be false so that contaminationExp is used.
-		experiment(self.numExperiment,run_all=False,view=False,cache=False, indiv = self.individual, returnFits = False, contaminationExp = True, numTimesteps = self.num_timesteps, delta = self.delta, corner_factor = self.corner_factor, gamma = self.gamma, acc = self.acc, dif_matrix = self.dif_matrix, wind = self.wind)
+		experiment(self.numExperiment,run_all=False,view=False,cache=False, indiv = self.individual, returnFits = False, contaminationExp = True, numTimesteps = self.num_timesteps, delta = self.delta, corner_factor = self.corner_factor, gamma = self.gamma, acc = self.acc, dif_matrix = self.dif_matrix, wind = self.wind, override_distributionCS=self.distributionCS, override_windV=self.windV)
 
 	def run2(self, timeTest):
-		return experiment(self.numExperiment,run_all=False,view=False,cache=False, indiv = self.individual, returnFits = False, contaminationExp = True, numTimesteps = self.num_timesteps, delta = self.delta, corner_factor = self.corner_factor, gamma = self.gamma, acc = self.acc, dif_matrix = self.dif_matrix, wind = self.wind, timeTest = timeTest)
+		return experiment(self.numExperiment,run_all=False,view=False,cache=False, indiv = self.individual, returnFits = False, contaminationExp = True, numTimesteps = self.num_timesteps, delta = self.delta, corner_factor = self.corner_factor, gamma = self.gamma, acc = self.acc, dif_matrix = self.dif_matrix, wind = self.wind, timeTest = timeTest, override_distributionCS=self.distributionCS, override_windV=self.windV)
 
 def wrappedTimeTest(args):
 	dCars, dEv, g = args
@@ -3963,7 +4160,7 @@ def getData2CNNExp(args, numExp = 10, numProcessors = 0) -> None:
 
 if __name__ == '__main__':
 	# Set default values to None
-	default_values = {'list': None, 'view': None, 'run': None, 'all': False, 'stats': False,'contamination':False, 'genetic':False, 'cnnData':False, 'timeout':0, 'processes':0, 'timeTest':False}#timeout de 7200
+	default_values = {'list': None, 'view': None, 'run': 0, 'all': False, 'stats': False,'contamination':True, 'genetic':False, 'cnnData':False, 'timeout':0, 'processes':0, 'timeTest':False}#timeout de 7200
 	parser = argparse.ArgumentParser(description='Selectively run experiments.')
 	parser.add_argument('--list', action='store_true', help='List all experiments', default=default_values['list'])
 	parser.add_argument('--view', type=int, help='View a specific experiment by index', default=default_values['view'])
@@ -3975,15 +4172,19 @@ if __name__ == '__main__':
 	parser.add_argument('--contamination', action='store_true', help='Perform contamination experiments', default=default_values['contamination'])
 	parser.add_argument('--timeout', type=int, help='Timeout to execute a pool of process', default=default_values['timeout'])
 	parser.add_argument('--processes', type=int, help='CPUs to use', default=default_values['processes'])
+	parser.add_argument('--timesteps', type=int, help='Number of timesteps to simulate', default=20)
 	parser.add_argument('--batch-size', type=int, help='batch size multiplier, default 1 which is equal to the number of processes', default=1)
 	parser.add_argument('--data-save-dir', type=str, help='Dir where save the output data', default='simulationData32Last')
 	parser.add_argument('--newData', action='store_true', help='Repeat the experiments with a clear run', default=False)
 	parser.add_argument('--timeTest', action='store_true', help='Perform contamination experiments', default=default_values['timeTest'])
+	parser.add_argument('--windexp', action='store_true',
+						help='Run the 3 real-city wind experiments (no wind / parallel / perpendicular)',
+						default=False)
 	#parser.add_argument()
 
-	global dataSaveDir
 	# dataSaveDir = args.data_save_dir
-	dataSaveDir = "/home/josmorfig1/sanevec/source/pysimtravel3_pollution/data/testTime" # HACK
+	dataSaveDir = "data/testTime" # HACK
+	os.makedirs(dataSaveDir, exist_ok=True)
 	# 44
 
 	args = parser.parse_args()
@@ -4008,7 +4209,7 @@ if __name__ == '__main__':
 				print(i, p.legendName)
 
 		if args.view is not None:
-			experiment(args.view,True)
+			experiment(args.view, view=True, run_all=False)
 
 		if args.run is not None:
 			if args.genetic:
@@ -4016,19 +4217,23 @@ if __name__ == '__main__':
 				g=Genetic(args.run)
 				g.run()
 
-			elif args.contamination:
-				print("Init contamination experiment:")
-				g = ContaminationExperiment(numExperiment=args.run)
-				g.run()
+			elif args.windexp:
+				print(f"Init real-city wind experiments ({args.timesteps} timesteps):")
+				realCityWindExperiments(numExperiment=args.run, num_timesteps=args.timesteps)
 
 			elif args.timeTest:
 				print("Init the testTime experiment.")
 
-				g = ContaminationExperiment(numExperiment=args.run, windV=(0.5, 0.3), distributionCS=1)
+				g = ContaminationExperiment(numExperiment=args.run, windV=(0.5, 0.3), distributionCS=1, num_timesteps=args.timesteps)
 				processors = multiprocessing.cpu_count() - 1 if args.processes == 0 else args.processes
 
 				print(f"###### Se van a utilizar batches de {processors} con la misma configuracion ######")
 				fTimeTest(g, processors)
+
+			elif args.contamination:
+				print(f"Init contamination experiment ({args.timesteps} timesteps):")
+				g = ContaminationExperiment(numExperiment=args.run, num_timesteps=args.timesteps)
+				g.run()
 
 			elif args.cnnData:
 				getData2CNNExp(args=args)
